@@ -8,7 +8,7 @@ use crate::{
         codegen::ir::{FuseArg, FuseOp, LayoutInfo},
         launch::{
             HandleInput,
-            layout::{DimOrder, dim_order, is_contiguous_order, strides_for},
+            layout::{DimOrder, dim_order, is_contiguous_order, nested_dim_order, strides_for},
         },
         settings::{FuseSettings, RefLayoutSetting},
         trace::{FuseResources, RegisterTensor, RuntimeLayout, TensorView, block::FuseBlock},
@@ -466,9 +466,18 @@ impl<'a> OutputPlanner<'a> {
                 }
             };
 
-            let Some(order) = dim_order(voter_shape, &input.handle.strides) else {
-                // Not dense: sliced, broadcast, or otherwise not describable as an
-                // order. The block cannot adopt a layout it cannot express.
+            // Padding is tolerated here where [dim_order] would reject it. A
+            // tile-aligned allocation leaves a channels-last tensor with a gap at
+            // its innermost dimension, and demanding density would drop exactly
+            // the tensors this vote exists to notice — every convolution output on
+            // a backend whose allocator pitches its rows. The order is what is
+            // being voted on, and padding does not disturb it: the output is
+            // allocated dense in the winning order either way, and an input whose
+            // strides then differ from the reference's is read through the strided
+            // path rather than as `SameAsRef`, which compares strides exactly.
+            let Some(order) = nested_dim_order(voter_shape, &input.handle.strides) else {
+                // Sliced, broadcast, overlapping: not describable as an order at
+                // all. The block cannot adopt a layout it cannot express.
                 continue;
             };
 
