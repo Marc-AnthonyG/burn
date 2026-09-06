@@ -36,6 +36,7 @@ struct DepthwiseArgs {
 }
 
 #[cube(launch_unchecked, address_type = "dynamic")]
+#[allow(clippy::redundant_closure)]
 fn depthwise_conv2d_kernel<E: Numeric, N: Size>(
     input: &Tensor<Vector<E, N>>,
     weight: &Tensor<Vector<E, N>>,
