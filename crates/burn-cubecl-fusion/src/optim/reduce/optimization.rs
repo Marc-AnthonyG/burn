@@ -1,5 +1,6 @@
 use super::args::{
     FusedReduceInput, FusedReduceInputLaunch, FusedReduceOutput, FusedReduceOutputLaunch,
+    MergedReduceView, ReduceView,
 };
 #[cfg(feature = "autotune")]
 use super::tune::fused_reduce_autotune;
@@ -37,8 +38,9 @@ use cubek::reduce::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[cfg(not(feature = "autotune"))]
-use cubek::reduce::routines::{BlueprintStrategy, unit::UnitStrategy};
+use cubek::reduce::routines::{
+    BlueprintStrategy, cube::CubeStrategy, plane::PlaneStrategy, unit::UnitStrategy,
+};
 
 pub struct ReduceOptimization {
     pub(crate) info: Arc<ReduceOptimizationInfo>,
@@ -153,7 +155,11 @@ pub struct FusedReduce {
     pub(crate) input: FuseArg,
     pub(crate) output: FuseArg,
     pub(crate) acc: FuseType,
+    /// The reduced axis, or the innermost of them when there are several.
     pub(crate) axis: usize,
+    /// Every reduced axis. More than one is a `SumDims`, which runs fused
+    /// only where those axes form one run of the reference layout.
+    pub(crate) axes: Vec<usize>,
     pub(crate) op: ReduceDimOpIr,
     pub(crate) use_planes: bool,
     pub(crate) shared: bool,
@@ -265,6 +271,18 @@ impl ReduceOptimization {
             fallback: Arc::new(fallback),
         };
 
+        // A reduction over several axes is fused only when the layout lets the
+        // routines see them as one, which is only known at launch. The tuner
+        // caches its pick per shape, not per layout, and would run a fused
+        // candidate on a layout it cannot merge, so these are not tuned.
+        if self.info.reduce.axes.len() > 1 {
+            let strategy = strategy_for_untuned_reduce(&self.info, context);
+            if arg.execute_fused(context, strategy).is_err() {
+                arg.execute_fallback(context);
+            }
+            return;
+        }
+
         #[cfg(feature = "autotune")]
         fused_reduce_autotune(arg, context);
 
@@ -342,13 +360,33 @@ impl TraceRunner for FusedReduceLaunch<'_> {
             }
             _ => inputs.shape_ref(&config_read.ref_layout, config_read.rank),
         };
-        let reduce_count: usize = shape
+        let strides = inputs.strides_ref(&config_read.ref_layout, config_read.rank);
+        let reference_shape: Vec<usize> = shape.iter().copied().collect();
+        let reference_strides: Vec<usize> = strides.iter().copied().collect();
+        let MergedReduceView {
+            view,
+            axis,
+            shape: view_shape,
+            strides: view_strides,
+        } = match self.reduce.axes.len() {
+            1 => MergedReduceView {
+                view: ReduceView::identity(config_read.rank),
+                axis: self.reduce.axis,
+                shape: reference_shape,
+                strides: reference_strides,
+            },
+            _ => ReduceView::merged(&reference_shape, &reference_strides, &self.reduce.axes)
+                .ok_or(FusedReduceError::InvalidInput)?,
+        };
+        let reduce_count: usize = view_shape
             .iter()
             .enumerate()
-            .map(|(i, s)| if i == self.reduce.axis { 1 } else { *s })
+            .map(|(i, s)| if i == axis { 1 } else { *s })
             .product();
 
-        let vectorization_mode = match self.reduce.axis == config_read.rank - 1 {
+        // Along the reduced axis when it is the innermost of the view, which
+        // for a merged run means the run reaches the contiguous dim.
+        let vectorization_mode = match axis == view_shape.len() - 1 {
             true => VectorizationMode::Parallel,
             false => VectorizationMode::Perpendicular,
         };
@@ -368,9 +406,9 @@ impl TraceRunner for FusedReduceLaunch<'_> {
             fuse_on_read: true,
         };
         let problem = ReduceProblem {
-            reduce_len: shape[self.reduce.axis],
+            reduce_len: view_shape[axis],
             reduce_count,
-            axis: self.reduce.axis,
+            axis,
             dtypes: ReduceDtypes {
                 input: dtype_to_storage_type(self.reduce.op.input.dtype),
                 output: dtype_to_storage_type(self.reduce.op.out.dtype),
@@ -395,18 +433,16 @@ impl TraceRunner for FusedReduceLaunch<'_> {
             }
         };
 
-        let out_vec_axis = output_vectorization_axis(
-            &inputs.strides_ref(&config_read.ref_layout, config_read.rank),
-            self.reduce.axis,
-            vectorization_mode,
-        );
+        let out_vec_axis =
+            output_vectorization_axis(&view_strides.into(), axis, vectorization_mode);
 
         let kwargs = ReduceKwArgs {
             client,
             inputs,
             outputs,
-            reduce_axis: self.reduce.axis,
+            reduce_axis: axis,
             out_vec_axis,
+            view,
             config_fuse_read: config_read.clone(),
             config_fuse_write: config_write.clone(),
             input: self.reduce.input.clone(),
@@ -435,6 +471,7 @@ struct ReduceKwArgs<'b> {
     outputs: GlobalArgsLaunch,
     reduce_axis: usize,
     out_vec_axis: usize,
+    view: ReduceView,
     blueprint: ReduceBlueprint,
     settings: ReduceLaunchSettings,
     config_fuse_read: FuseBlockConfig,
@@ -484,8 +521,18 @@ fn launch_reduce(
             kwargs.settings.address_type,
             kwargs.config_fuse_read.width,
             kwargs.config_fuse_write.width,
-            FusedReduceInputLaunch::new(kwargs.inputs, kwargs.config_fuse_read, kwargs.input),
-            FusedReduceOutputLaunch::new(kwargs.outputs, kwargs.config_fuse_write, kwargs.output),
+            FusedReduceInputLaunch::new(
+                kwargs.inputs,
+                kwargs.config_fuse_read,
+                kwargs.input,
+                kwargs.view.clone(),
+            ),
+            FusedReduceOutputLaunch::new(
+                kwargs.outputs,
+                kwargs.config_fuse_write,
+                kwargs.output,
+                kwargs.view,
+            ),
             kwargs.reduce_axis,
             kwargs.out_vec_axis,
             kwargs.blueprint,
@@ -570,5 +617,36 @@ impl FusedOperation for ReduceOptimization {
 
     fn from_state(device: &cubecl::Device, state: Self::State) -> Self {
         Self::from_state(device, state)
+    }
+}
+
+/// Roughly what the tuner would rank first: a cube per output for a long
+/// reduction, a plane for a middling one, a unit for a short one.
+fn strategy_for_untuned_reduce(
+    info: &ReduceOptimizationInfo,
+    context: &Context<CubeFusionHandle>,
+) -> RoutineStrategy {
+    let reduce_len: usize = context
+        .tensors
+        .get(&info.reduce.op.input.id)
+        .map(|tensor| {
+            info.reduce
+                .axes
+                .iter()
+                .map(|axis| tensor.shape[*axis])
+                .product()
+        })
+        .unwrap_or(1);
+
+    if reduce_len >= 1024 {
+        RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
+            use_planes: true,
+        }))
+    } else if reduce_len >= 64 {
+        RoutineStrategy::Plane(BlueprintStrategy::Inferred(PlaneStrategy {
+            independent: false,
+        }))
+    } else {
+        RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy))
     }
 }

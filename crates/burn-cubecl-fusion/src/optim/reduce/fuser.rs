@@ -11,7 +11,7 @@ use crate::{
     optim::CubeOptimization,
 };
 use burn_fusion::{FuserStatus, OperationFuser};
-use burn_ir::{BaseOperationIr, NumericOperationIr, OperationIr, ReduceDimOpIr};
+use burn_ir::{BaseOperationIr, NumericOperationIr, OperationIr, ReduceDimOpIr, ReduceDimsOpIr};
 use burn_std::Shape;
 
 /// Fuses element wise operations around a reduce operation.
@@ -149,10 +149,78 @@ impl ReduceFuser {
             output,
             acc,
             axis,
+            axes: vec![axis],
             op: op.clone(),
             use_planes: false,
             shared: false,
             inst,
+        });
+
+        self.fuser_read_fallback.close();
+    }
+
+    /// A sum over several axes. Fused like a single-axis sum where the axes
+    /// form one run of the layout, which is decided at launch; the read block
+    /// is let take its reference from any dense input, since that run is a
+    /// property of the memory order, not of the logical one.
+    fn on_reduce_dims(&mut self, op: &ReduceDimsOpIr) {
+        let axis = match op.axes.iter().max() {
+            Some(axis) => *axis,
+            None => return self.fuser.close(),
+        };
+        let single = ReduceDimOpIr {
+            input: op.input.clone(),
+            out: op.out.clone(),
+            axis,
+            accumulator_len: 1,
+        };
+
+        if op.axes.len() == 1 {
+            return self.on_reduce(&single, ReduceInstruction::Sum);
+        }
+
+        if self.fuser.current_output_shape != op.input.shape {
+            self.fuser.close();
+            self.fuser_read_fallback.close();
+            return;
+        }
+
+        self.fuser.relax_reference_layout();
+
+        let [input] = self
+            .fuser
+            .next_block([&op.input], self.settings_write, false);
+
+        let output = self.fuser.output_unhandled(&op.out);
+        let last_axis = op.input.shape.rank() - 1;
+
+        let fuse_on_write_activated = match self.settings {
+            ReduceSettings::Always => true,
+            ReduceSettings::OnlyParallel => !op.axes.contains(&last_axis),
+            ReduceSettings::Never => false,
+        };
+
+        if !fuse_on_write_activated {
+            self.fuser.close();
+        }
+
+        let acc = match input.precision() {
+            FuseType::F16 | FuseType::BF16 => FuseType::F32,
+            FuseType::I16 | FuseType::I8 => FuseType::I32,
+            FuseType::U16 | FuseType::U8 => FuseType::U32,
+            _ => input.precision(),
+        };
+
+        self.reduce = Some(FusedReduce {
+            input,
+            output,
+            acc,
+            axis,
+            axes: op.axes.clone(),
+            op: single,
+            use_planes: false,
+            shared: false,
+            inst: ReduceInstruction::Sum,
         });
 
         self.fuser_read_fallback.close();
@@ -226,6 +294,9 @@ impl OperationFuser<CubeOptimization> for ReduceFuser {
                     NumericOperationIr::SumDim(op) => {
                         self.on_reduce(op, ReduceInstruction::Sum);
                     }
+                    NumericOperationIr::SumDims(op) => {
+                        self.on_reduce_dims(op);
+                    }
                     NumericOperationIr::MeanDim(op) => {
                         self.on_reduce(op, ReduceInstruction::Mean);
                     }
@@ -255,6 +326,9 @@ impl OperationFuser<CubeOptimization> for ReduceFuser {
                 match op {
                     NumericOperationIr::SumDim(op) => {
                         self.on_reduce(op, ReduceInstruction::Sum);
+                    }
+                    NumericOperationIr::SumDims(op) => {
+                        self.on_reduce_dims(op);
                     }
                     NumericOperationIr::MeanDim(op) => {
                         self.on_reduce(op, ReduceInstruction::Mean);

@@ -69,6 +69,45 @@ fn dimensions_that_are_not_adjacent_in_any_order_still_sum_correctly() {
 }
 
 #[test]
+fn an_elementwise_op_feeding_the_sum_folds_the_channels_last_dimensions() {
+    // The batch-norm backward's shape: something computed from the tensor,
+    // then summed over every dimension but the channels, on a tensor held
+    // channels-last. Those dimensions are one run of the memory, so a fused
+    // reduction can take the elementwise op into its read.
+    let (permuted, contiguous) = permuted_and_contiguous();
+
+    assert_same(
+        (permuted * 3.0 + 1.0).sum_dims(&[0, 2, 3]),
+        one_dim_at_a_time(contiguous * 3.0 + 1.0, &[0, 2, 3]),
+    );
+}
+
+#[test]
+fn an_elementwise_op_feeding_the_sum_over_a_split_run_still_sums_correctly() {
+    // On the contiguous copy the same dimensions are split by the channels in
+    // memory, which no single reduction can fold; the answer must not change.
+    let (_, contiguous) = permuted_and_contiguous();
+
+    assert_same(
+        (contiguous.clone() * 3.0 + 1.0).sum_dims(&[0, 2, 3]),
+        one_dim_at_a_time(contiguous * 3.0 + 1.0, &[0, 2, 3]),
+    );
+}
+
+#[test]
+fn an_elementwise_op_feeding_the_sum_over_a_run_that_ends_at_the_contiguous_dimension() {
+    // Reducing everything but the batch on the channels-last tensor is a run
+    // that includes the contiguous dimension, the case where the reduction is
+    // vectorized along its own axis.
+    let (permuted, contiguous) = permuted_and_contiguous();
+
+    assert_same(
+        (permuted * 3.0 + 1.0).sum_dims(&[1, 2, 3]),
+        one_dim_at_a_time(contiguous * 3.0 + 1.0, &[1, 2, 3]),
+    );
+}
+
+#[test]
 fn a_single_dimension_is_the_plain_sum_dim() {
     let (permuted, contiguous) = permuted_and_contiguous();
 

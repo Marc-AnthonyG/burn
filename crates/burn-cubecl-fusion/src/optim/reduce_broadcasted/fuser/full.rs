@@ -160,6 +160,7 @@ impl ReduceBroadcastedFullFuser {
                     output,
                     acc: reduce.acc,
                     axis: reduce.axis,
+                    axes: reduce.axes.clone(),
                     op: reduce.op.clone(),
                     use_planes: reduce.use_planes,
                     shared: reduce.shared,
