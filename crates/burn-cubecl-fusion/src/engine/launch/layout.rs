@@ -72,6 +72,7 @@ pub fn strides_for(shape: &[usize], order: &[usize]) -> Strides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn_std::Shape;
 
     #[test]
     fn round_trips_through_strides() {
