@@ -563,6 +563,49 @@ fn test_conv2d_groups() {
 }
 
 #[test]
+fn test_conv2d_depthwise_matches_one_channel_at_a_time() {
+    // A stride, padding and dilation all at once, on a channel count that is
+    // not a multiple of the vector width, so the depthwise path has to get its
+    // bounds and its channel vectors right. The reference is the same
+    // convolution run one channel at a time through the ungrouped path.
+    let device = Default::default();
+    let (batch, channels, height, width) = (2, 6, 7, 6);
+    let depthwise = ConvOptions::new([2, 1], [1, 2], [2, 1], channels);
+
+    let x = TestTensor::<4>::from(
+        TestTensorInt::arange(0..(batch * channels * height * width) as i64, &device)
+            .reshape::<4, _>(Shape::new([batch, channels, height, width]))
+            .into_data(),
+    ) / 100.0;
+    let weight = TestTensor::<4>::from(
+        TestTensorInt::arange(0..(channels * 9) as i64, &device)
+            .reshape::<4, _>(Shape::new([channels, 1, 3, 3]))
+            .into_data(),
+    ) / 10.0
+        - 2.0;
+    let bias =
+        TestTensor::<1>::from(TestTensorInt::arange(0..channels as i64, &device).into_data());
+
+    let output = conv2d(x.clone(), weight.clone(), Some(bias.clone()), depthwise);
+
+    let one_at_a_time = (0..channels)
+        .map(|channel| {
+            conv2d(
+                x.clone().slice([0..batch, channel..channel + 1]),
+                weight.clone().slice([channel..channel + 1]),
+                Some(bias.clone().slice([channel..channel + 1])),
+                ConvOptions::new([2, 1], [1, 2], [2, 1], 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = TestTensor::cat(one_at_a_time, 1);
+
+    expected
+        .into_data()
+        .assert_approx_eq::<FloatElem>(&output.into_data(), Tolerance::default());
+}
+
+#[test]
 fn test_conv2d_groups_multiple_channels() {
     let test = Conv2dTestCase {
         batch_size: 1,
