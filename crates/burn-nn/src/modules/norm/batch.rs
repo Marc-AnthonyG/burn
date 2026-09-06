@@ -153,23 +153,6 @@ impl BatchNorm {
 
         output
     }
-
-    fn forward_shared<const D: usize>(
-        &self,
-        x: Tensor<D>,
-        mean: Tensor<D>,
-        var: Tensor<D>,
-    ) -> Tensor<D> {
-        let channels = x.dims()[1];
-        burn::tensor::module::batch_norm(
-            x,
-            self.gamma.val(),
-            self.beta.val(),
-            mean.reshape([channels]),
-            var.reshape([channels]),
-            self.epsilon,
-        )
-    }
 }
 
 impl ModuleDisplay for BatchNorm {
