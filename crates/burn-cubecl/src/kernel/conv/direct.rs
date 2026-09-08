@@ -313,6 +313,10 @@ pub fn conv_direct<const N: usize>(
         weight = into_contiguous_aligned(weight);
     }
 
+    if super::depthwise::is_depthwise(&input, &weight, &options) {
+        return super::depthwise::conv_depthwise(input, weight, bias, options);
+    }
+
     let batch_size = input.meta.shape()[0];
     let in_shape = &input.meta.shape()[1..dim_c];
     let out_channels = weight.meta.shape()[0];
@@ -405,7 +409,7 @@ pub fn conv_direct<const N: usize>(
     Ok(output)
 }
 
-fn should_check_spatial_bounds<const N: usize>(
+pub(super) fn should_check_spatial_bounds<const N: usize>(
     in_shape: &[usize],
     kernel_shape: &[usize],
     out_shape: &[usize],

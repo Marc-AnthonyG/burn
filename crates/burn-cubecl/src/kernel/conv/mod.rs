@@ -5,6 +5,7 @@ mod conv_transpose2d;
 mod conv_transpose3d;
 mod deform_conv2d;
 mod deform_conv_transpose2d;
+mod depthwise;
 mod direct;
 mod forward;
 mod im2col;
