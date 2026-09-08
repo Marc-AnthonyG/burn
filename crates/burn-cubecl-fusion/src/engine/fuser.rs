@@ -1,6 +1,6 @@
 use super::{
     codegen::ir::{BinaryFuseArgs, FuseArg, FuseOp, UnaryFuseArgs},
-    settings::FuseSettings,
+    settings::{FuseSettings, RefLayoutSetting},
     trace::{FuseTrace, TraceFuser, block::QuantInput},
 };
 use crate::engine::{codegen::ir::QuantSchemeFuse, scoring::Scoring};
@@ -249,6 +249,12 @@ impl TraceOperationFuser {
         }
 
         self.fuser.fuser.output_unhandled(tensor)
+    }
+
+    /// Lets the block being built take its reference from any dense input.
+    pub(crate) fn relax_reference_layout(&mut self) {
+        self.settings.ref_layout = RefLayoutSetting::Any;
+        self.fuser.fuser.relax_reference_layout();
     }
 
     /// Closes the previous block and declares a new one.

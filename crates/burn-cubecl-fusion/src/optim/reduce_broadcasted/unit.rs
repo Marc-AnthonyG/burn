@@ -1,3 +1,4 @@
+use crate::optim::reduce::args::ReduceView;
 use crate::{
     engine::codegen::{
         ir::{FuseArg, FuseBlockConfig, FuseType, GlobalArgs, multi_block_variables_init},
@@ -145,14 +146,17 @@ fn reduce_many(
             global: inputs.clone(),
             config: comptime!(block.config_input.clone()),
             arg: comptime!(block.input.clone()),
+            view: comptime!(ReduceView::identity(block.config_input.rank)),
         };
         let global = outputs.clone();
         let config = comptime!(block.config_output.clone());
         let arg = comptime!(block.output.clone());
+        let view = comptime!(ReduceView::identity(config.rank));
         let mut output = FusedReduceOutput {
             global,
             config,
             arg,
+            view,
         };
 
         set_polyfill_block(block);

@@ -1,7 +1,7 @@
 use super::{
     super::{
         codegen::ir::{FuseArg, FuseOp, FuseType, LayoutInfo},
-        settings::FuseSettings,
+        settings::{FuseSettings, RefLayoutSetting},
     },
     FuseResources,
     block::FuseBlockBuilder,
@@ -63,6 +63,13 @@ impl TraceFuser {
 
         num_ops_fused += self.block_current.ops.len();
         num_ops_fused as u32
+    }
+
+    /// Lets the block being built take its reference from any dense input
+    /// rather than only a logically contiguous one.
+    pub fn relax_reference_layout(&mut self) {
+        self.settings.ref_layout = RefLayoutSetting::Any;
+        self.block_current.settings.ref_layout = RefLayoutSetting::Any;
     }
 
     /// Close the current block with the given reference shape and creates a new one with new [fusion settings](FuseSettings).
